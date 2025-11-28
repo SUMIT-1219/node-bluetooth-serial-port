@@ -1,0 +1,88 @@
+name: Prebuild Native Binaries for macOS
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v2.2.8)
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  prebuild-macos:
+    # Use a matrix strategy to run two jobs in parallel: one for Intel, one for Apple Silicon
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use a Node version compatible with Electron 15 (Node 16 or 18 is usually safest)
+        # We will specify the architecture explicitly
+        node-version: [16.x] 
+        # GitHub uses different runners for different architectures
+        include:
+          - os: macos-latest
+            arch: x64
+            # ARCH_FLAG is used to explicitly tell prebuildify what to build
+            arch_flag: x64
+          - os: macos-latest
+            arch: arm64
+            arch_flag: arm64
+    
+    # Run the job on the macOS runner with the specified architecture
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }} (${{ matrix.arch }})
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          architecture: ${{ matrix.arch }}
+
+      - name: Install Dependencies
+        run: npm ci
+
+      # The crucial step: build the native module for the target Electron ABI and Architecture
+      - name: Run Prebuildify for ${{ matrix.arch }}
+        # The 'prebuild' script runs: prebuildify --napi --strip --target=15.3.1
+        # We override the architecture using the PREBUILD_ARCH env variable for accuracy
+        run: |
+          npm run prebuild
+        env:
+          PREBUILD_ARCH: ${{ matrix.arch_flag }}
+          # This command will compile the binary, which prebuildify then names
+          # e.g., 'electron.abi93.node.arm64' (if ABI 93 is used by Electron 15.3.1)
+
+      - name: Combine Prebuilt Binaries
+        # This step runs after both architecture jobs complete.
+        # It aggregates the prebuilds into a single directory.
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilds-macos
+          path: prebuilds/
+
+  publish:
+    # This job ensures we wait for all prebuilds before publishing.
+    needs: [prebuild-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download all prebuild artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilds-macos
+          path: prebuilds/
+          
+      # NOTE: In a real project, you would now use 'npm publish' 
+      # which includes the 'prebuilds' folder in the final npm tarball.
+      - name: Verify and List Prebuilds
+        run: ls -R prebuilds
+        
+      # To publish the prebuilds with your GitHub release:
+      # - name: Publish Prebuilds to GitHub Release
+      #   uses: softprops/action-gh-release@v1
+      #   if: startsWith(github.ref, 'refs/tags/')
+      #   with:
+      #     files: prebuilds/*
+      #     token: ${{ secrets.GITHUB_TOKEN }}
